@@ -42,6 +42,8 @@
       border-block: 1px solid #344436aa;
     }
     .controls { display: grid; grid-template-columns: minmax(220px, 1fr) 210px; gap: 12px; }
+    .controls.with-class-filter { grid-template-columns: minmax(220px, 1fr) 210px 190px; }
+    .controls.with-map-filter { grid-template-columns: minmax(220px, 1fr) 210px 190px; }
     .search-wrap { position: relative; }
     .search-icon { position: absolute; left: 14px; top: 50%; transform: translateY(-50%); color: var(--gold); }
     input, select {
@@ -118,7 +120,7 @@
     @media (max-width: 760px) {
       .shell { width: min(100% - 26px, 620px); }
       header { padding-top: 26px; }
-      .controls { grid-template-columns: 1fr; }
+      .controls, .controls.with-class-filter, .controls.with-map-filter { grid-template-columns: 1fr; }
       .layout { grid-template-columns: 1fr; }
       .list { grid-template-columns: repeat(2, minmax(0, 1fr)); max-height: 320px; }
       .detail { position: static; }
@@ -141,6 +143,8 @@
           <input id="search" type="search" autocomplete="off" placeholder="Buscar por nome, identificador, mapa..." aria-label="Buscar na base de dados">
         </label>
         <select id="filter" aria-label="Filtrar por categoria"></select>
+        <select id="class-filter" class="hidden" aria-label="Filtrar itens por classe"></select>
+        <select id="map-filter" class="hidden" aria-label="Filtrar por mapa"></select>
       </div>
       <nav class="tabs" aria-label="Categorias">
         <button class="tab" data-tab="items" aria-selected="true">Itens</button>
@@ -180,6 +184,7 @@
       weapon: "Arma", shield: "Escudo", armor: "Armadura", helmet: "Elmo", legs: "Calças",
       boots: "Botas", amulet: "Amuleto", ring: "Anel", container: "Mochila",
       ammo: "Munição", consumable: "Consumível", material: "Material", currency: "Moeda",
+      arcanist: "Arcanista", hunter: "Caçador", mystic: "Místico", warrior: "Guerreiro",
       kill: "Caça", deliver: "Entrega", explore: "Exploração",
       field: "Campo", farm: "Fazenda", forest: "Floresta", swamp: "Pântano", coast: "Costa",
       snow: "Neve", volcano: "Vulcão", ruins: "Ruínas", badlands: "Terras áridas",
@@ -266,6 +271,21 @@
       if (currentTab === "quests") return DB.quests;
       return DB.npcs;
     }
+    function associatedMapIds(row, tab = currentTab) {
+      if (tab === "monsters") return row.mapIds || [];
+      if (tab === "npcs") return row.map ? [row.map] : [];
+      if (tab === "quests") {
+        const questMaps = [row.map, row.requiresMap].filter(Boolean);
+        if (questMaps.length) return [...new Set(questMaps)];
+        const questNpcIds = [row.giver, row.turnInTo].filter(Boolean);
+        return [...new Set(questNpcIds.map((id) => DB.npcs.find((npc) => npc.id === id)?.map).filter(Boolean))];
+      }
+      return [];
+    }
+    function averageCreatureLevel(map) {
+      const levels = (map.creatures || []).map((id) => monsterById[id]?.level).filter(Number.isFinite);
+      return levels.length ? levels.reduce((sum, level) => sum + level, 0) / levels.length : null;
+    }
     function entityName(row) {
       if (currentTab === "items") return itemName(row.id);
       if (currentTab === "monsters") return monsterName(row.id);
@@ -293,6 +313,23 @@
     }
     function filterTypes(rows) {
       const select = document.getElementById("filter");
+      const classSelect = document.getElementById("class-filter");
+      const mapSelect = document.getElementById("map-filter");
+      const mapFilterVisible = ["monsters", "quests", "npcs"].includes(currentTab);
+      classSelect.classList.toggle("hidden", currentTab !== "items");
+      mapSelect.classList.toggle("hidden", !mapFilterVisible);
+      const controls = document.querySelector(".controls");
+      controls.classList.toggle("with-class-filter", currentTab === "items");
+      controls.classList.toggle("with-map-filter", mapFilterVisible);
+      classSelect.innerHTML = '<option value="">Todas as classes</option>' +
+        [...new Set(DB.items.flatMap((item) => item.classes || []))].sort().map((value) =>
+          '<option value="' + esc(value) + '">' + esc(label(value)) + '</option>'
+        ).join("");
+      const mapIds = [...new Set(rows.flatMap((row) => associatedMapIds(row)))].sort((a, b) =>
+        mapName(a).localeCompare(mapName(b), "pt-BR", { sensitivity: "base", numeric: true }));
+      mapSelect.innerHTML = '<option value="">Todos os mapas</option>' + mapIds.map((id) =>
+        '<option value="' + esc(id) + '">' + esc(mapName(id)) + '</option>'
+      ).join("");
       const values = currentTab === "items" ? [...new Set(rows.map((x) => x.kind))].sort() :
         currentTab === "maps" ? [...new Set(rows.map((x) => x.biome))].sort() :
         currentTab === "monsters" ? [...new Set(rows.map((x) => x.tier || "normal"))].sort() :
@@ -365,13 +402,36 @@
       const all = getCollection();
       const search = normalize(document.getElementById("search").value.trim());
       const chosen = document.getElementById("filter").value;
+      const chosenClass = currentTab === "items" ? document.getElementById("class-filter").value : "";
+      const chosenMap = ["monsters", "quests", "npcs"].includes(currentTab) ?
+        document.getElementById("map-filter").value : "";
       const rows = all.filter((row) => {
         const category = currentTab === "items" ? row.kind : currentTab === "maps" ? row.biome :
           currentTab === "monsters" ? (row.tier || "normal") :
           currentTab === "quests" ? row.kind : (row.wiki?.services || [])[0];
         const matchesFilter = !chosen || (currentTab === "npcs" ?
           (row.wiki?.services || []).includes(chosen) : category === chosen);
-        return matchesFilter && (!search || searchable(row).includes(search));
+        const matchesClass = !chosenClass || !row.classes?.length || row.classes.includes(chosenClass);
+        const matchesMap = !chosenMap || associatedMapIds(row).includes(chosenMap);
+        return matchesFilter && matchesClass && matchesMap && (!search || searchable(row).includes(search));
+      }).sort((a, b) => {
+        if (currentTab === "items" || currentTab === "monsters") return (a.level ?? Infinity) - (b.level ?? Infinity);
+        if (currentTab === "maps") {
+          const averageA = averageCreatureLevel(a) ?? Infinity;
+          const averageB = averageCreatureLevel(b) ?? Infinity;
+          return averageA - averageB || mapName(a.id).localeCompare(mapName(b.id), "pt-BR", { sensitivity: "base" });
+        }
+        if (currentTab === "quests" || currentTab === "npcs") {
+          const mapsA = associatedMapIds(a).map(mapName).sort((x, y) =>
+            x.localeCompare(y, "pt-BR", { sensitivity: "base", numeric: true })).join(" · ");
+          const mapsB = associatedMapIds(b).map(mapName).sort((x, y) =>
+            x.localeCompare(y, "pt-BR", { sensitivity: "base", numeric: true })).join(" · ");
+          const byMap = mapsA.localeCompare(mapsB, "pt-BR", { sensitivity: "base", numeric: true });
+          if (byMap) return byMap;
+          if (currentTab === "quests") return (a.minLevel ?? Infinity) - (b.minLevel ?? Infinity);
+          return entityName(a).localeCompare(entityName(b), "pt-BR", { sensitivity: "base" });
+        }
+        return 0;
       });
       if (rows.length && !rows.some((x) => x.id === selectedId)) selectedId = rows[0].id;
       if (!rows.length) selectedId = null;
@@ -397,9 +457,13 @@
       list.innerHTML = rows.length ? rows.map((row) => {
         const subtitle = currentTab === "items" ? label(row.kind) + (row.level ? " · Nv. " + row.level : "") :
           currentTab === "monsters" ? "Nv. " + row.level + " · " + ((row.mapIds || []).length ? row.mapIds.map(mapName).join(", ") : "Região não informada") :
-          currentTab === "maps" ? label(row.biome) + " · " + (row.creatures || []).length + ((row.creatures || []).length === 1 ? " criatura" : " criaturas") :
-          currentTab === "quests" ? label(row.kind) + " · Nv. " + (row.minLevel ?? "—") :
-            (row.wiki?.services || []).join(", ") || "NPC";
+          currentTab === "maps" ? label(row.biome) + " · Nv. médio " +
+            (averageCreatureLevel(row) == null ? "—" : formatNumber(Math.ceil(averageCreatureLevel(row)))) + " · " +
+            (row.creatures || []).length + ((row.creatures || []).length === 1 ? " criatura" : " criaturas") :
+          currentTab === "quests" ? (associatedMapIds(row).map(mapName).join(", ") || "Mapa não informado") +
+            " · " + label(row.kind) + " · Nv. " + (row.minLevel ?? "—") :
+            (associatedMapIds(row).map(mapName).join(", ") || "Mapa não informado") +
+            " · " + ((row.wiki?.services || []).join(", ") || "NPC");
         const visual = currentTab === "items" || currentTab === "monsters";
         const content = visual ?
           '<span class="entry-visual">' + entityImage(currentTab, row, false) +
@@ -615,6 +679,8 @@
       document.getElementById("search").value = "";
       document.querySelectorAll(".tab").forEach((button) => button.setAttribute("aria-selected", String(button.dataset.tab === tab)));
       document.getElementById("filter").value = "";
+      document.getElementById("class-filter").value = "";
+      document.getElementById("map-filter").value = "";
       filterTypes(getCollection());
       renderList();
       document.getElementById("list").scrollTop = 0;
@@ -634,9 +700,13 @@
     });
     document.getElementById("search").addEventListener("input", renderList);
     document.getElementById("filter").addEventListener("change", renderList);
+    document.getElementById("class-filter").addEventListener("change", renderList);
+    document.getElementById("map-filter").addEventListener("change", renderList);
     document.getElementById("clear").addEventListener("click", () => {
       document.getElementById("search").value = "";
       document.getElementById("filter").value = "";
+      document.getElementById("class-filter").value = "";
+      document.getElementById("map-filter").value = "";
       renderList();
       document.getElementById("search").focus();
     });
